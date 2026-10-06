@@ -17,6 +17,14 @@ using namespace facebook::react;
 @implementation RNCNaverMapMarker {
   RNCNaverMapImageCanceller _imageCanceller;
   BOOL _isImageSetFromSubview;
+  // Whether an icon (from the image prop or a custom view) has been applied to the marker.
+  // Until then the marker is kept transparent so that the SDK default icon is never visible.
+  BOOL _isIconReady;
+  // Alpha requested by the `alpha` prop. `_inner.alpha` is this value only when the icon is ready.
+  CGFloat _alpha;
+  // Incremented whenever the icon source changes, to drop results of stale async work.
+  NSUInteger _iconGeneration;
+  __weak UIView* _customView;
 }
 
 + (bool)shouldBeRecycled {
@@ -33,6 +41,9 @@ using namespace facebook::react;
   if ((self = [super init])) {
     _inner = [NMFMarker new];
     _isImageSetFromSubview = NO;
+    _isIconReady = NO;
+    _alpha = 1;
+    _iconGeneration = 0;
 
     _inner.touchHandler = [self](NMFOverlay* overlay) -> BOOL {
       if (self.emitter) {
@@ -81,13 +92,22 @@ using namespace facebook::react;
   }
 }
 
+/**
+ * Applies the alpha to the marker.
+ * The marker stays transparent until its first icon is ready, and the previous icon stays
+ * visible while a new one is being prepared. This prevents the default icon from flashing.
+ */
+- (void)applyAlpha {
+  _inner.alpha = _isIconReady ? _alpha : 0;
+}
+
 - (void)setImage:(facebook::react::RNCNaverMapMarkerImageStruct)image {
   _image = image;
   // If subview exists for custom marker, then skip image
   if (_isImageSetFromSubview) {
     return;
   }
-  _inner.alpha = 0;
+  [self applyAlpha];
 
   // Cancel pending request
   if (_imageCanceller) {
@@ -95,14 +115,22 @@ using namespace facebook::react;
     _imageCanceller = nil;
   }
 
+  NSUInteger generation = ++_iconGeneration;
+  __weak RNCNaverMapMarker* weakSelf = self;
   _imageCanceller = nmap::getImage(image, ^(NMFOverlayImage* _Nullable image) {
-    runOnMain([self, image]() {
-      self.inner.alpha = 1;
-      if (image) {
-        self.inner.iconImage = image;
+    runOnMain([weakSelf, image, generation]() {
+      RNCNaverMapMarker* strongSelf = weakSelf;
+      // The image prop was changed again or a custom view was mounted in the meantime
+      if (!strongSelf || strongSelf->_iconGeneration != generation) {
+        return;
       }
-      self->_imageCanceller = nil;
-      [self ensureTouchHandler]; // Re-ensure touch handler after image is set
+      if (image) {
+        strongSelf.inner.iconImage = image;
+      }
+      strongSelf->_isIconReady = YES;
+      [strongSelf applyAlpha];
+      strongSelf->_imageCanceller = nil;
+      [strongSelf ensureTouchHandler]; // Re-ensure touch handler after image is set
     });
   });
 }
@@ -124,23 +152,52 @@ using namespace facebook::react;
     _imageCanceller = nil;
   }
   _isImageSetFromSubview = YES;
-  _inner.alpha = 0;
-  // prevent default image is set after this logic in old arch
-  runOnMain([self, subview]() {
-    self.inner.alpha = 1;
-    self.inner.iconImage = [NMFOverlayImage overlayImageWithImage:[self captureView:subview]];
-    [self ensureTouchHandler]; // Re-ensure touch handler after custom marker image is set
+  _customView = subview;
+  // Keep the current icon (if any) until the new custom view is captured.
+  [self applyAlpha];
+
+  NSUInteger generation = ++_iconGeneration;
+  __weak RNCNaverMapMarker* weakSelf = self;
+  // Capture after the current mounting transaction so that the subview is fully laid out.
+  runOnMain([weakSelf, subview, generation]() {
+    RNCNaverMapMarker* strongSelf = weakSelf;
+    if (!strongSelf || strongSelf->_iconGeneration != generation) {
+      return;
+    }
+    UIImage* captured = [strongSelf captureView:subview];
+    if (captured) {
+      strongSelf.inner.iconImage = [NMFOverlayImage overlayImageWithImage:captured];
+      strongSelf->_isIconReady = YES;
+    }
+    [strongSelf applyAlpha];
+    [strongSelf ensureTouchHandler]; // Re-ensure touch handler after custom marker image is set
   });
 }
 
 - (void)removeReactSubview:(UIView*)subview {
-  _isImageSetFromSubview = NO;
+  if (_customView == subview) {
+    _customView = nil;
+  }
 
-  // after custom marker is removed, set image from prop.
-  self.image = _image;
+  // When the custom view is replaced (e.g. its `key` is changed), the removal is followed by an
+  // insertion in the same mounting transaction. Falling back to the image prop right away would
+  // show the default icon for a moment, so decide after the transaction is finished.
+  __weak RNCNaverMapMarker* weakSelf = self;
+  runOnMain([weakSelf]() {
+    RNCNaverMapMarker* strongSelf = weakSelf;
+    if (!strongSelf || strongSelf->_customView) {
+      return;
+    }
+    strongSelf->_isImageSetFromSubview = NO;
+    // after custom marker is removed, set image from prop.
+    strongSelf.image = strongSelf->_image;
+  });
 }
 
 - (UIImage*)captureView:(UIView*)view {
+  if (CGRectIsEmpty(view.bounds)) {
+    return nil;
+  }
   UIGraphicsImageRenderer* renderer =
       [[UIGraphicsImageRenderer alloc] initWithSize:view.bounds.size];
   auto ret =
@@ -188,8 +245,10 @@ using namespace facebook::react;
     [_inner setFlat:next.isFlatEnabled];
   if (prev.isIconPerspectiveEnabled != next.isIconPerspectiveEnabled)
     [_inner setIconPerspectiveEnabled:next.isIconPerspectiveEnabled];
-  if (prev.alpha != next.alpha)
-    [_inner setAlpha:next.alpha];
+  if (prev.alpha != next.alpha) {
+    _alpha = next.alpha;
+    [self applyAlpha];
+  }
   if (prev.isHideCollidedSymbols != next.isHideCollidedSymbols)
     [_inner setIsHideCollidedSymbols:next.isHideCollidedSymbols];
   if (prev.isHideCollidedMarkers != next.isHideCollidedMarkers)

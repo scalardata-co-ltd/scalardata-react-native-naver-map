@@ -1,13 +1,13 @@
 package com.mjstudio.reactnativenavermap.overlay.marker
 
 import android.annotation.SuppressLint
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.os.Build
 import android.view.View
+import androidx.annotation.RequiresApi
 import androidx.core.graphics.createBitmap
 import androidx.core.view.children
-import androidx.core.view.isEmpty
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.uimanager.ThemedReactContext
 import com.mjstudio.reactnativenavermap.event.NaverMapOverlayTapEvent
@@ -30,9 +30,16 @@ class RNCNaverMapMarker(
 ) : RNCNaverMapImageRenderableOverlay<Marker>(reactContext),
   TrackableView {
   private var customView: View? = null
-  private var customViewBitmap: Bitmap? = null
 
   private var isImageSetFromSubview = false
+
+  // Whether the custom view should be drawn to the marker icon again on the next tracking tick.
+  private var isCustomViewDirty = false
+  private var lastRenderedWidth = 0
+  private var lastRenderedHeight = 0
+
+  private val customViewLayoutChangeListener =
+    OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> isCustomViewDirty = true }
 
   private var lastCaptionKey = DEFAULT_CAPTION_KEY
   private var lastSubCaptionKey = DEFAULT_CAPTION_KEY
@@ -59,12 +66,6 @@ class RNCNaverMapMarker(
     overlay.map = null
   }
 
-  override fun onDropViewInstance() {
-    overlay.map = null
-    overlay.onClickListener = null
-    super.onDropViewInstance()
-  }
-
   fun setCustomView(
     view: View,
     index: Int,
@@ -79,46 +80,68 @@ class RNCNaverMapMarker(
         ),
       )
     }
-    ViewChangesTracker.getInstance().addMarker(this)
+    view.addOnLayoutChangeListener(customViewLayoutChangeListener)
+    if (!ViewChangesTracker.getInstance().containsMarker(this)) {
+      ViewChangesTracker.getInstance().addMarker(this)
+    }
     customView = view
     updateCustomView()
     overlay.alpha = 1f
   }
 
   fun removeCustomView(index: Int) {
+    customView?.removeOnLayoutChangeListener(customViewLayoutChangeListener)
+    customView = null
+    super.removeView(children.elementAt(index))
+
+    // When the custom view is replaced (e.g. its `key` is changed), the removal is followed by an
+    // insertion in the same batch. Falling back to the image prop right away would show the
+    // default icon for a moment, so decide after the batch is finished.
+    // The bitmap of the icon is not recycled here because the map may still be drawing it.
+    post {
+      if (customView != null) return@post
+      ViewChangesTracker.getInstance().removeMarker(this)
+      isImageSetFromSubview = false
+      setImageWithLastImage()
+    }
+  }
+
+  override fun onDropViewInstance() {
+    customView?.removeOnLayoutChangeListener(customViewLayoutChangeListener)
     customView = null
     ViewChangesTracker.getInstance().removeMarker(this)
-    if (customViewBitmap != null && !customViewBitmap!!.isRecycled) customViewBitmap!!.recycle()
-    isImageSetFromSubview = false
-    setImageWithLastImage()
-    super.removeView(children.elementAt(index))
+    overlay.map = null
+    overlay.onClickListener = null
+    super.onDropViewInstance()
   }
 
   override fun requestLayout() {
     super.requestLayout()
-    if (isEmpty() && customView != null) {
-      customView = null
-      updateCustomView()
-    }
+    isCustomViewDirty = true
+  }
+
+  // Called when the custom view or one of its descendants needs to be drawn again.
+  // (e.g. an image is loaded, a text is changed)
+  @RequiresApi(Build.VERSION_CODES.O)
+  override fun onDescendantInvalidated(
+    child: View,
+    target: View,
+  ) {
+    super.onDescendantInvalidated(child, target)
+    isCustomViewDirty = true
   }
 
   private fun updateCustomView() {
-    if (customViewBitmap == null ||
-      customViewBitmap!!.isRecycled ||
-      customViewBitmap?.width != overlay.width ||
-      customViewBitmap?.height != overlay.height
-    ) {
-      customViewBitmap =
-        createBitmap(max(1, overlay.width), max(1, overlay.height), Bitmap.Config.ARGB_4444)
-    }
-    if (customView != null) {
-      customViewBitmap?.also { bitmap ->
-        bitmap.eraseColor(Color.TRANSPARENT)
-        val canvas = Canvas(bitmap)
-        draw(canvas)
-        setOverlayImage(OverlayImage.fromBitmap(bitmap))
-      }
-    }
+    if (customView == null) return
+    isCustomViewDirty = false
+    lastRenderedWidth = overlay.width
+    lastRenderedHeight = overlay.height
+
+    // A new bitmap is created for every render instead of reusing the previous one, because
+    // the previous one is owned by the map once it is passed as an icon.
+    val bitmap = createBitmap(max(1, overlay.width), max(1, overlay.height))
+    draw(Canvas(bitmap))
+    setOverlayImage(OverlayImage.fromBitmap(bitmap))
   }
 
   override fun skipTryRender(): Boolean = isImageSetFromSubview
@@ -126,7 +149,17 @@ class RNCNaverMapMarker(
   override fun updateCustomForTracking(): Boolean = true
 
   override fun update() {
-    updateCustomView()
+    // Drawing every custom view and uploading it as a new icon on every tick makes the app run
+    // out of memory when there are many markers, so render only when something has changed.
+    // `onDescendantInvalidated` is available from API 26, so always render below it.
+    val isChanged =
+      isCustomViewDirty ||
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+        lastRenderedWidth != overlay.width ||
+        lastRenderedHeight != overlay.height
+    if (isChanged) {
+      updateCustomView()
+    }
   }
 
   override fun setOverlayAlpha(alpha: Float) {
