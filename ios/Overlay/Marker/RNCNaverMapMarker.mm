@@ -17,6 +17,10 @@ using namespace facebook::react;
 @implementation RNCNaverMapMarker {
   RNCNaverMapImageCanceller _imageCanceller;
   BOOL _isImageSetFromSubview;
+  BOOL _isIconReady;
+  CGFloat _alpha;
+  NSUInteger _iconGeneration;
+  __weak UIView* _customView;
 }
 
 + (bool)shouldBeRecycled {
@@ -33,6 +37,9 @@ using namespace facebook::react;
   if ((self = [super init])) {
     _inner = [NMFMarker new];
     _isImageSetFromSubview = NO;
+    _isIconReady = NO;
+    _alpha = 1;
+    _iconGeneration = 0;
 
     _inner.touchHandler = [self](NMFOverlay* overlay) -> BOOL {
       if (self.emitter) {
@@ -81,13 +88,17 @@ using namespace facebook::react;
   }
 }
 
+- (void)applyAlpha {
+  _inner.alpha = _isIconReady ? _alpha : 0;
+}
+
 - (void)setImage:(facebook::react::RNCNaverMapMarkerImageStruct)image {
   _image = image;
   // If subview exists for custom marker, then skip image
   if (_isImageSetFromSubview) {
     return;
   }
-  _inner.alpha = 0;
+  [self applyAlpha];
 
   // Cancel pending request
   if (_imageCanceller) {
@@ -95,14 +106,21 @@ using namespace facebook::react;
     _imageCanceller = nil;
   }
 
+  NSUInteger generation = ++_iconGeneration;
+  __weak RNCNaverMapMarker* weakSelf = self;
   _imageCanceller = nmap::getImage(image, ^(NMFOverlayImage* _Nullable image) {
-    runOnMain([self, image]() {
-      self.inner.alpha = 1;
-      if (image) {
-        self.inner.iconImage = image;
+    runOnMain([weakSelf, image, generation]() {
+      RNCNaverMapMarker* strongSelf = weakSelf;
+      if (!strongSelf || strongSelf->_iconGeneration != generation) {
+        return;
       }
-      self->_imageCanceller = nil;
-      [self ensureTouchHandler]; // Re-ensure touch handler after image is set
+      if (image) {
+        strongSelf.inner.iconImage = image;
+      }
+      strongSelf->_isIconReady = YES;
+      [strongSelf applyAlpha];
+      strongSelf->_imageCanceller = nil;
+      [strongSelf ensureTouchHandler]; // Re-ensure touch handler after image is set
     });
   });
 }
@@ -124,23 +142,48 @@ using namespace facebook::react;
     _imageCanceller = nil;
   }
   _isImageSetFromSubview = YES;
-  _inner.alpha = 0;
+  _customView = subview;
+  [self applyAlpha];
+
+  NSUInteger generation = ++_iconGeneration;
+  __weak RNCNaverMapMarker* weakSelf = self;
   // prevent default image is set after this logic in old arch
-  runOnMain([self, subview]() {
-    self.inner.alpha = 1;
-    self.inner.iconImage = [NMFOverlayImage overlayImageWithImage:[self captureView:subview]];
-    [self ensureTouchHandler]; // Re-ensure touch handler after custom marker image is set
+  runOnMain([weakSelf, subview, generation]() {
+    RNCNaverMapMarker* strongSelf = weakSelf;
+    if (!strongSelf || strongSelf->_iconGeneration != generation) {
+      return;
+    }
+    UIImage* captured = [strongSelf captureView:subview];
+    if (captured) {
+      strongSelf.inner.iconImage = [NMFOverlayImage overlayImageWithImage:captured];
+      strongSelf->_isIconReady = YES;
+    }
+    [strongSelf applyAlpha];
+    [strongSelf ensureTouchHandler]; // Re-ensure touch handler after custom marker image is set
   });
 }
 
 - (void)removeReactSubview:(UIView*)subview {
-  _isImageSetFromSubview = NO;
+  if (_customView == subview) {
+    _customView = nil;
+  }
 
-  // after custom marker is removed, set image from prop.
-  self.image = _image;
+  __weak RNCNaverMapMarker* weakSelf = self;
+  runOnMain([weakSelf]() {
+    RNCNaverMapMarker* strongSelf = weakSelf;
+    if (!strongSelf || strongSelf->_customView) {
+      return;
+    }
+    strongSelf->_isImageSetFromSubview = NO;
+    // after custom marker is removed, set image from prop.
+    strongSelf.image = strongSelf->_image;
+  });
 }
 
 - (UIImage*)captureView:(UIView*)view {
+  if (CGRectIsEmpty(view.bounds)) {
+    return nil;
+  }
   UIGraphicsImageRenderer* renderer =
       [[UIGraphicsImageRenderer alloc] initWithSize:view.bounds.size];
   auto ret =
@@ -188,8 +231,10 @@ using namespace facebook::react;
     [_inner setFlat:next.isFlatEnabled];
   if (prev.isIconPerspectiveEnabled != next.isIconPerspectiveEnabled)
     [_inner setIconPerspectiveEnabled:next.isIconPerspectiveEnabled];
-  if (prev.alpha != next.alpha)
-    [_inner setAlpha:next.alpha];
+  if (prev.alpha != next.alpha) {
+    _alpha = next.alpha;
+    [self applyAlpha];
+  }
   if (prev.isHideCollidedSymbols != next.isHideCollidedSymbols)
     [_inner setIsHideCollidedSymbols:next.isHideCollidedSymbols];
   if (prev.isHideCollidedMarkers != next.isHideCollidedMarkers)

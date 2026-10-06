@@ -39,6 +39,7 @@ abstract class RNCNaverMapImageRenderableOverlay<T : Overlay>(
     if (skipTryRender()) return
     setOverlayAlpha(0f)
     getOverlayImage(imageHolder!!, context, image?.toHashMap()) {
+      if (skipTryRender()) return@getOverlayImage
       setOverlayImage(it)
       setOverlayAlpha(1f)
     }
