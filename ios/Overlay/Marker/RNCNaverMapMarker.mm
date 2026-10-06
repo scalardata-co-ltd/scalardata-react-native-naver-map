@@ -17,12 +17,8 @@ using namespace facebook::react;
 @implementation RNCNaverMapMarker {
   RNCNaverMapImageCanceller _imageCanceller;
   BOOL _isImageSetFromSubview;
-  // Whether an icon (from the image prop or a custom view) has been applied to the marker.
-  // Until then the marker is kept transparent so that the SDK default icon is never visible.
   BOOL _isIconReady;
-  // Alpha requested by the `alpha` prop. `_inner.alpha` is this value only when the icon is ready.
   CGFloat _alpha;
-  // Incremented whenever the icon source changes, to drop results of stale async work.
   NSUInteger _iconGeneration;
   __weak UIView* _customView;
 }
@@ -92,11 +88,6 @@ using namespace facebook::react;
   }
 }
 
-/**
- * Applies the alpha to the marker.
- * The marker stays transparent until its first icon is ready, and the previous icon stays
- * visible while a new one is being prepared. This prevents the default icon from flashing.
- */
 - (void)applyAlpha {
   _inner.alpha = _isIconReady ? _alpha : 0;
 }
@@ -120,7 +111,6 @@ using namespace facebook::react;
   _imageCanceller = nmap::getImage(image, ^(NMFOverlayImage* _Nullable image) {
     runOnMain([weakSelf, image, generation]() {
       RNCNaverMapMarker* strongSelf = weakSelf;
-      // The image prop was changed again or a custom view was mounted in the meantime
       if (!strongSelf || strongSelf->_iconGeneration != generation) {
         return;
       }
@@ -153,12 +143,11 @@ using namespace facebook::react;
   }
   _isImageSetFromSubview = YES;
   _customView = subview;
-  // Keep the current icon (if any) until the new custom view is captured.
   [self applyAlpha];
 
   NSUInteger generation = ++_iconGeneration;
   __weak RNCNaverMapMarker* weakSelf = self;
-  // Capture after the current mounting transaction so that the subview is fully laid out.
+  // prevent default image is set after this logic in old arch
   runOnMain([weakSelf, subview, generation]() {
     RNCNaverMapMarker* strongSelf = weakSelf;
     if (!strongSelf || strongSelf->_iconGeneration != generation) {
@@ -179,9 +168,6 @@ using namespace facebook::react;
     _customView = nil;
   }
 
-  // When the custom view is replaced (e.g. its `key` is changed), the removal is followed by an
-  // insertion in the same mounting transaction. Falling back to the image prop right away would
-  // show the default icon for a moment, so decide after the transaction is finished.
   __weak RNCNaverMapMarker* weakSelf = self;
   runOnMain([weakSelf]() {
     RNCNaverMapMarker* strongSelf = weakSelf;

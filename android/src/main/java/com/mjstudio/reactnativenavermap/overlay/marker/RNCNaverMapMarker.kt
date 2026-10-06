@@ -33,7 +33,6 @@ class RNCNaverMapMarker(
 
   private var isImageSetFromSubview = false
 
-  // Whether the custom view should be drawn to the marker icon again on the next tracking tick.
   private var isCustomViewDirty = false
   private var lastRenderedWidth = 0
   private var lastRenderedHeight = 0
@@ -94,10 +93,6 @@ class RNCNaverMapMarker(
     customView = null
     super.removeView(children.elementAt(index))
 
-    // When the custom view is replaced (e.g. its `key` is changed), the removal is followed by an
-    // insertion in the same batch. Falling back to the image prop right away would show the
-    // default icon for a moment, so decide after the batch is finished.
-    // The bitmap of the icon is not recycled here because the map may still be drawing it.
     post {
       if (customView != null) return@post
       ViewChangesTracker.getInstance().removeMarker(this)
@@ -120,8 +115,6 @@ class RNCNaverMapMarker(
     isCustomViewDirty = true
   }
 
-  // Called when the custom view or one of its descendants needs to be drawn again.
-  // (e.g. an image is loaded, a text is changed)
   @RequiresApi(Build.VERSION_CODES.O)
   override fun onDescendantInvalidated(
     child: View,
@@ -137,8 +130,6 @@ class RNCNaverMapMarker(
     lastRenderedWidth = overlay.width
     lastRenderedHeight = overlay.height
 
-    // A new bitmap is created for every render instead of reusing the previous one, because
-    // the previous one is owned by the map once it is passed as an icon.
     val bitmap = createBitmap(max(1, overlay.width), max(1, overlay.height))
     draw(Canvas(bitmap))
     setOverlayImage(OverlayImage.fromBitmap(bitmap))
@@ -149,9 +140,6 @@ class RNCNaverMapMarker(
   override fun updateCustomForTracking(): Boolean = true
 
   override fun update() {
-    // Drawing every custom view and uploading it as a new icon on every tick makes the app run
-    // out of memory when there are many markers, so render only when something has changed.
-    // `onDescendantInvalidated` is available from API 26, so always render below it.
     val isChanged =
       isCustomViewDirty ||
         Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||

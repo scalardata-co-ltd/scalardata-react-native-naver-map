@@ -39,7 +39,6 @@ abstract class RNCNaverMapImageRenderableOverlay<T : Overlay>(
     if (skipTryRender()) return
     setOverlayAlpha(0f)
     getOverlayImage(imageHolder!!, context, image?.toHashMap()) {
-      // A custom view could be mounted while the image was being loaded
       if (skipTryRender()) return@getOverlayImage
       setOverlayImage(it)
       setOverlayAlpha(1f)
