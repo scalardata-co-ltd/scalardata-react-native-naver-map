@@ -34,6 +34,7 @@ class RNCNaverMapMarker(
   private var isImageSetFromSubview = false
 
   private var isCustomViewDirty = false
+  private var hasCustomViewImage = false
   private var lastRenderedWidth = 0
   private var lastRenderedHeight = 0
 
@@ -84,8 +85,10 @@ class RNCNaverMapMarker(
       ViewChangesTracker.getInstance().addMarker(this)
     }
     customView = view
+    if (!hasCustomViewImage) {
+      overlay.alpha = 0f
+    }
     updateCustomView()
-    overlay.alpha = 1f
   }
 
   fun removeCustomView(index: Int) {
@@ -97,6 +100,7 @@ class RNCNaverMapMarker(
       if (customView != null) return@post
       ViewChangesTracker.getInstance().removeMarker(this)
       isImageSetFromSubview = false
+      hasCustomViewImage = false
       setImageWithLastImage()
     }
   }
@@ -125,7 +129,11 @@ class RNCNaverMapMarker(
   }
 
   private fun updateCustomView() {
-    if (customView == null) return
+    val view = customView ?: return
+    if (view.width == 0 || view.height == 0) {
+      isCustomViewDirty = true
+      return
+    }
     isCustomViewDirty = false
     lastRenderedWidth = overlay.width
     lastRenderedHeight = overlay.height
@@ -133,6 +141,10 @@ class RNCNaverMapMarker(
     val bitmap = createBitmap(max(1, overlay.width), max(1, overlay.height))
     draw(Canvas(bitmap))
     setOverlayImage(OverlayImage.fromBitmap(bitmap))
+    if (!hasCustomViewImage) {
+      hasCustomViewImage = true
+      overlay.alpha = 1f
+    }
   }
 
   override fun skipTryRender(): Boolean = isImageSetFromSubview
